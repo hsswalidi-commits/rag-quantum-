@@ -1,0 +1,287 @@
+[
+  {
+    "n": 1,
+    "q": "ما هو مبدأ عدم اليقين لهايزنبرغ؟",
+    "type": "in_scope",
+    "answer": "مبدأ عدم اليقين لهايزنبرغ ينص على أنه من المستحيل من حيث المبدأ معرفة بعض أزواج الخصائص الفيزيائية لجسيم كمومي بدقة تامة في نفس الوقت، مثل الموضع والزخم. كلما زادت دقة معرفتنا بموضع الجسيم، قلّت دقة معرفتنا بزخمه، والعكس صحيح.",
+    "sources": [
+      "01_quantum_physics_foundations.md",
+      "02_quantum_computing_basics.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 2,
+    "q": "ما هي تجربة قطة شرودنغر؟",
+    "type": "in_scope",
+    "answer": "تجربة قطة شرودنغر هي تجربة فكرية اقترحها الفيزيائي إروين شرودنغر عام 1935 لتوضيح مبدأ التراكب في ميكانيكا الكم. في هذه التجربة، القطة داخل صندوق مغلق تكون في حالة تراكب بين \"حية\" و\"ميتة\" إلى أن يُفتح الصندوق ويتم قياس الحالة الفعلية.",
+    "sources": [
+      "01_quantum_physics_foundations.md",
+      "Lecturer_2_PDF (1).pdf (ص 17)",
+      "Lecturer_2_PDF (1).pdf (ص 5)"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 3,
+    "q": "ما هو التشابك الكمومي؟",
+    "type": "in_scope",
+    "answer": "التشابك الكمومي هو أحد الركائز الأساسية التي يعتمد عليها الحوسبة الكمومية والتشفير الكمومي، إذ يسمح بربط عدة كيوبتات (qubits) بطريقة لا يمكن لأي نظام كلاسيكي تقليدها بكفاءة.",
+    "sources": [
+      "01_quantum_physics_foundations.md",
+      "02_quantum_computing_basics.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 4,
+    "q": "ما الفرق بين البت والكيوبت؟",
+    "type": "in_scope",
+    "answer": "البت هو الوحدة الأساسية للمعلومات في الحوسبة الكلاسيكية، ويأخذ قيمة واحدة فقط في كل لحظة: إما 0 أو 1. أما الكيوبت فهو الوحدة الأساسية للمعلومات في الحوسبة الكمومية، ويمكنه أن يحمل معلومات عن كل الحالات الممكنة في آن واحد بفضل التراكب الكمومي.",
+    "sources": [
+      "02_quantum_computing_basics.md",
+      "03_quantum_algorithms.md",
+      "Lecturer_2_PDF (1).pdf (ص 6)"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 5,
+    "q": "ما وظيفة بوابة هادامارد؟",
+    "type": "in_scope",
+    "answer": "تقوم بوابة هادامارد بتحويل كيوبت من حالة محددة (0 أو 1) إلى حالة تراكب متساوٍ بين 0 و1، وهي غالبًا أول خطوة في أي خوارزمية كمومية لخلق التراكب.",
+    "sources": [
+      "02_quantum_computing_basics.md",
+      "03_quantum_algorithms.md",
+      "Lecturer_2_PDF (1).pdf (ص 5)"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 6,
+    "q": "ما هي بوابة CNOT؟",
+    "type": "in_scope",
+    "answer": "بوابة CNOT (Controlled-NOT) هي بوابة تعمل على كيوبتين، وتُستخدم لخلق التشابك بينهما.",
+    "sources": [
+      "02_quantum_computing_basics.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": true,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 7,
+    "q": "لماذا لا تُستخدم الحوسبة الكمومية في كل شيء؟",
+    "type": "in_scope",
+    "answer": "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي.",
+    "sources": [],
+    "refused": true,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": false,
+    "reasons": [
+      "رفض بالغلط",
+      "المصدر المتوقع ['02_quantum_computing_basics.md'] غير موجود"
+    ]
+  },
+  {
+    "n": 8,
+    "q": "ما هي خوارزمية شور؟",
+    "type": "in_scope",
+    "answer": "خوارزمية شور هي خوارزمية كمومية طوّرها عالم الرياضيات بيتر شور عام 1994، وتُعتبر أشهر خوارزمية كمومية على الإطلاق. تُستخدم لتحليل الأعداد الصحيحة الكبيرة إلى عواملها الأولية بكفاءة أُسّية أفضل من أي خوارزمية كلاسيكية معروفة.",
+    "sources": [
+      "03_quantum_algorithms.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 9,
+    "q": "ماذا تفعل خوارزمية غروفر؟",
+    "type": "in_scope",
+    "answer": "خوارزمية غروفر تحل مسألة البحث في قاعدة بيانات غير مرتبة. إذا كانت قاعدة البيانات الكلاسيكية تحتاج للبحث عن عنصر واحد بين N عنصر بمتوسط N/2 محاولة (بحث خطي)، فإن خوارزمية غروفر تحتاج فقط لحوالي الجذر التربيعي لـ N من الخطوات - وهي تسريع \"تربيعي\".",
+    "sources": [
+      "03_quantum_algorithms.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 10,
+    "q": "ما هي خوارزمية VQE؟",
+    "type": "in_scope",
+    "answer": "خوارزمية \"المُقدِّر الكمومي المتغير\" (VQE) هي خوارزمية هجينة تُستخدم لإيجاد أدنى مستوى طاقة لنظام كمومي، وهي مسألة أساسية في الكيمياء الكمومية لفهم استقرار الجزيئات وتفاعلاتها. تُعتبر من أوائل التطبيقات العملية المتوقّع أن تُظهر فائدة كمومية حقيقية على العتاد.",
+    "sources": [
+      "03_quantum_algorithms.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": true,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 11,
+    "q": "How does Grover's algorithm speed up search?",
+    "type": "in_scope",
+    "answer": "Grover's algorithm speeds up the search in an unsorted database by reducing the number of steps needed to find an element from an average of N/2 attempts in a classical linear search to approximately the square root of N steps. This provides a quadratic speedup, which, while less dramatic than the exponential speedup of Shor's algorithm, is still theoretically beneficial for any search problem.",
+    "sources": [
+      "03_quantum_algorithms.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 12,
+    "q": "كيف تعمل الكيوبتات فائقة التوصيل؟",
+    "type": "in_scope",
+    "answer": "تُبنى الكيوبتات فائقة التوصيل من دارات كهربائية مصغّرة مصنوعة من مواد فائقة التوصيل، وتُبرَّد إلى درجات حرارة قريبة جدًا من الصفر المطلق (حوالي 15 مللي كلفن) باستخدام ثلاجات تبريد تخفيفي. هذا النهج يتيح سرعة تنفيذ البوابات الكمومية عالية نسبيًا وقابلية التصنيع باستخدام تقنيات مشابهة لصناعة أشباه الموصلات.",
+    "sources": [
+      "03_quantum_algorithms.md",
+      "04_quantum_hardware_and_challenges.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 13,
+    "q": "ما هو تصحيح الأخطاء الكمومية؟",
+    "type": "in_scope",
+    "answer": "تصحيح الأخطاء الكمومية هو عملية معقدة تهدف إلى اكتشاف وتصحيح الأخطاء التي تحدث في الكيوبتات دون قياس الحالة الكمومية مباشرة، وذلك باستخدام \"الكيوبت المنطقي\" الذي يتكون من تجميع عدد كبير من الكيوبتات الفيزيائية للعمل كوحدة واحدة أكثر موثوقية. هذه الطريقة تسمح باكتشاف وتصحيح الأخطاء الناتجة عن التفاعل مع البيئة المحيطة أو بسبب العمليات الكمومية ذاتها.",
+    "sources": [
+      "02_quantum_computing_basics.md",
+      "04_quantum_hardware_and_challenges.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 14,
+    "q": "ما هو عصر NISQ؟",
+    "type": "in_scope",
+    "answer": "عصر NISQ هو الجيل الحالي من الحواسيب الكمومية التي تحتوي على عشرات إلى بضع مئات من الكيوبتات الفيزيائية، بدون تصحيح أخطاء كامل، مما يجعلها عرضة للتشوش والأخطاء بمعدلات ملحوظة. هذا العصر يركز على تطوير خوارزميات هجينة قادرة على تقديم فائدة عملية حتى على أجهزة محدودة القدرة.",
+    "sources": [
+      "03_quantum_algorithms.md",
+      "04_quantum_hardware_and_challenges.md"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": true,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 15,
+    "q": "What are trapped ion qubits?",
+    "type": "in_scope",
+    "answer": "Trapped ion qubits are a type of qubit that can be physically implemented using controllable quantum systems, where the quantum information is encoded in the internal states of ions that are confined and manipulated using electromagnetic fields.",
+    "sources": [
+      "01_quantum_physics_foundations.md",
+      "04_quantum_hardware_and_challenges.md",
+      "Lecturer_2_PDF (1).pdf (ص 2)",
+      "Lecturer_2_PDF (1).pdf (ص 7)"
+    ],
+    "refused": false,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 16,
+    "q": "من هو رئيس الولايات المتحدة؟",
+    "type": "out_of_scope",
+    "answer": "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي.",
+    "sources": [],
+    "refused": true,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 17,
+    "q": "ما هي عاصمة فرنسا؟",
+    "type": "out_of_scope",
+    "answer": "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي.",
+    "sources": [],
+    "refused": true,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 18,
+    "q": "كيف أطبخ الكبسة؟",
+    "type": "out_of_scope",
+    "answer": "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي.",
+    "sources": [],
+    "refused": true,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 19,
+    "q": "ما هو أفضل هاتف في العالم؟",
+    "type": "out_of_scope",
+    "answer": "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي.",
+    "sources": [],
+    "refused": true,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  },
+  {
+    "n": 20,
+    "q": "What is the weather today?",
+    "type": "out_of_scope",
+    "answer": "The answer is not available in the provided context.",
+    "sources": [],
+    "refused": true,
+    "language_ok": true,
+    "keywords_ok": null,
+    "passed_main": true,
+    "reasons": []
+  }
+]

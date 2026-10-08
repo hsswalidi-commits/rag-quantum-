@@ -1,0 +1,31 @@
+[project]
+name = "rag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "huggingface-hub>=1.32.0",
+    "langchain-huggingface>=1.2.2",
+    "langchain-openai>=1.6.2",
+    "langchain-text-splitters>=1.1.2",
+    "openai>=3.16.2",
+    "pypdf>=6.19.0",
+    "python-dotenv>=1.2.3",
+    "qdrant-client>=1.19.1",
+    "rank-bm25>=0.2.2",
+    "sentence-transformers>=6.1.0",
+    "streamlit>=1.64.0",
+]
+
+[project.scripts]
+rag = "rag:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "black>=26.10.0",
+]
