@@ -580,7 +580,7 @@ def answer_question(
 def main() -> None:
     llm_client, embedding_model, qdrant_client = load_clients()
     ingest_knowledge_base(qdrant_client, embedding_model)
-1
+
     memory = ConversationMemory()
 
     while True:
