@@ -3,4 +3,4 @@ __pycache__/
 .venv/
 .streamlit/secrets.toml
 conversations*
-*.db
+*.dbapp_backup.py
