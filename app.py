@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 from dotenv import load_dotenv
@@ -34,6 +35,7 @@ VECTOR_SIZE = 384
 
 KNOWLEDGE_BASE_DIR = os.getenv("KNOWLEDGE_BASE_DIR", "knowledge_base")
 KNOWLEDGE_FILE_EXTENSIONS = (".md", ".txt", ".pdf")
+
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 2
 
@@ -56,6 +58,15 @@ REFERENCE_WORDS = {
 
 DEBUG_REWRITE = os.getenv("DEBUG_REWRITE") == "1"
 FORCE_REINGEST = os.getenv("FORCE_REINGEST") == "1"
+
+
+def save_uploaded_file(filename: str, content: bytes) -> Path:
+    """يحفظ الملف المرفوع داخل مجلد قاعدة المعرفة ويرجّع مساره."""
+    kb_dir = Path(KNOWLEDGE_BASE_DIR)
+    kb_dir.mkdir(parents=True, exist_ok=True)
+    target = kb_dir / Path(filename).name
+    target.write_bytes(content)
+    return target
 
 
 @dataclass
@@ -81,6 +92,24 @@ class RetrievedChunk:
     text: str
     source: str
     score: float
+    # حقول التشخيص (تستخدمها واجهة chat_app). لها قيم افتراضية
+    # عشان البحث الدلالي العادي يشتغل بدونها.
+    via: str = "semantic"
+    semantic_rank: int | None = None
+    bm25_rank: int | None = None
+    bm25_score: float = 0.0
+
+
+def source_label(chunk: RetrievedChunk) -> str:
+    """اسم الملف فقط بدون المسار."""
+    return os.path.basename(str(chunk.source))
+
+
+def _no_context_message(query: str) -> str:
+    """رسالة الرفض لما ما يوجد سياق مناسب، بلغة السؤال."""
+    if re.search(r"[\u0600-\u06FF]", query):
+        return "الإجابة غير متوفرة في السياق المتاح."
+    return "The answer is not available in the provided context."
 
 
 def clean_model_answer(content) -> str:
@@ -101,7 +130,6 @@ def clean_model_answer(content) -> str:
 
     text = str(content).strip()
 
-    
     text = re.sub(
         r"<think\b[^>]*>.*?</think\s*>", "", text, flags=re.IGNORECASE | re.DOTALL
     )
@@ -142,7 +170,6 @@ def clean_model_answer(content) -> str:
     return text.strip()
 
 
-
 def build_prompt(context: str, query: str) -> str:
     return f"""
 Use only the supplied context to answer the question.
@@ -152,7 +179,7 @@ Instructions:
 - Do not explain your reasoning or the retrieval process.
 - If the answer is not available in the context, say:
   "The answer is not available in the provided context."
-- - Answer in the same language as the user's question.
+- Answer in the same language as the user's question.
 - Give a complete answer: at least 2-3 full sentences when the context
   supports it. Avoid single-word or single-phrase answers unless the
   question explicitly asks for a short list or a yes/no.
@@ -163,6 +190,7 @@ CONTEXT:
 QUESTION:
 {query}
 """.strip()
+
 
 def looks_like_followup(question: str) -> bool:
     """
@@ -197,7 +225,6 @@ def rewrite_query(
     if not history:
         return current_question
 
-  
     if not looks_like_followup(current_question) and len(current_question.split()) > 4:
         return current_question
 
@@ -238,7 +265,6 @@ def rewrite_query(
         return rewritten or current_question
 
     except Exception:
-   
         return current_question
 
 
@@ -260,7 +286,7 @@ def retrieve_context(
     )
 
     results = []
-    for result in search_response.points:
+    for rank, result in enumerate(search_response.points, start=1):
         payload = result.payload or {}
         text = payload.get("text")
         if text and result.score >= threshold:
@@ -269,6 +295,8 @@ def retrieve_context(
                     text=text,
                     source=payload.get("source", "unknown"),
                     score=result.score,
+                    via="semantic",
+                    semantic_rank=rank,
                 )
             )
 
@@ -305,7 +333,6 @@ def generate_answer(
     )
     answer = clean_model_answer(response.choices[0].message.content)
 
-    
     if not answer:
         retry_response = _call_generation_model(
             llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS_RETRY
@@ -327,7 +354,6 @@ def load_clients() -> tuple[OpenAI, HuggingFaceEmbeddings, QdrantClient]:
             "Missing environment variables: " + ", ".join(missing_variables)
         )
 
-    
     llm_client = OpenAI(
         base_url=OPENROUTER_BASE_URL, api_key=os.getenv("OPENROUTER_API_KEY")
     )
@@ -338,6 +364,7 @@ def load_clients() -> tuple[OpenAI, HuggingFaceEmbeddings, QdrantClient]:
 
     return llm_client, embedding_model, qdrant_client
 
+
 def _stable_point_id(source: str, chunk_index: int, chunk: str) -> str:
     """معرف ثابت مبني على المصدر وترتيب القطعة ومحتواها."""
     digest = hashlib.sha256(f"{source}:{chunk_index}:{chunk}".encode("utf-8")).hexdigest()
@@ -346,6 +373,7 @@ def _stable_point_id(source: str, chunk_index: int, chunk: str) -> str:
 
 def _file_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
 
 def _load_source_files(directory: str) -> dict[str, str]:
     """تحميل محتوى ملفات .md و .txt و .pdf من مجلد قاعدة المعرفة."""
@@ -528,6 +556,7 @@ def ingest_knowledge_base(
     else:
         print(f"اكتملت الفهرسة: {total_new_chunks} قطعة جديدة/محدَّثة.")
 
+
 def answer_question(
     llm_client: OpenAI,
     embedding_model: HuggingFaceEmbeddings,
@@ -614,7 +643,7 @@ def main() -> None:
         except Exception as error:
             error_text = str(error)
             if "402" in error_text or "Payment Required" in error_text:
-                print(""" """  """ """
+                print(
                     "\nAn error occurred: OpenRouter usage credits are "
                     "depleted for this account. Add credits, then try again."
                 )
