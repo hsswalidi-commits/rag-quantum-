@@ -312,19 +312,32 @@ def _call_generation_model(
 
 
 def generate_answer(
-    llm_client: OpenAI, model_name: str, context: str, query: str
+    llm_client: OpenAI,
+    model_name: str,
+    context: str,
+    query: str,
+    language: str,
+    previous_answer: str | None = None,
 ) -> str:
-    prompt = build_prompt(context=context, query=query)
+    prompt = build_prompt(
+        context=context,
+        query=query,
+        language=language,
+        previous_answer=previous_answer,
+    )
 
     response = _call_generation_model(
-        llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS
+        llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS, language=language
     )
     answer = clean_model_answer(response.choices[0].message.content)
 
-    
     if not answer:
         retry_response = _call_generation_model(
-            llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS_RETRY
+            llm_client,
+            model_name,
+            prompt,
+            max_tokens=ANSWER_MAX_TOKENS_RETRY,
+            language=language,
         )
         answer = clean_model_answer(retry_response.choices[0].message.content)
 
@@ -544,6 +557,25 @@ def ingest_knowledge_base(
     else:
         print(f"اكتملت الفهرسة: {total_new_chunks} قطعة جديدة/محدَّثة.")
 
+        
+_USED_LINE = re.compile(
+    r"(?:^|\n)[ \t*_]*USED[ \t*_]*:[ \t*_]*([^\n]*)\s*$", re.IGNORECASE
+)
+
+
+def split_used_passages(answer: str, passage_count: int) -> tuple[str, list[int]]:
+    """Strip the trailing 'USED: 1, 3' line the model appends. Returns the
+    cleaned answer and the valid passage numbers it reported (an empty list
+    if the line is missing or unusable)."""
+    match = _USED_LINE.search(answer)
+    if not match:
+        return answer.strip(), []
+
+    reported = {int(number) for number in re.findall(r"\d+", match.group(1))}
+    valid = sorted(number for number in reported if 1 <= number <= passage_count)
+    return answer[: match.start()].strip(), valid
+
+
 def answer_question(
     llm_client: OpenAI,
     embedding_model: HuggingFaceEmbeddings,
@@ -551,6 +583,8 @@ def answer_question(
     query: str,
     memory: ConversationMemory,
 ) -> tuple[str, list[str]]:
+    language = detect_language(query)
+
     rewritten_query = rewrite_query(
         llm_client=llm_client,
         model_name=GENERATION_MODEL_NAME,
@@ -573,14 +607,32 @@ def answer_question(
         memory.add(query, rewritten_query, answer)
         return answer, []
 
-    context = "\n\n---\n\n".join(chunk.text for chunk in relevant_chunks)
+    # A rewritten query means this was a follow-up ("tell me more"). Pass the
+    # last real answer so the model adds new details instead of repeating it.
+    non_answers = set(NO_ANSWER_MESSAGES.values()) | set(NO_MORE_MESSAGES.values())
+    previous_answer = None
+    if rewritten_query != query:
+        for turn in reversed(memory.turns):
+            if turn.answer not in non_answers:
+                previous_answer = turn.answer
+                break
+
+    # Number the passages so the model can report which ones it used.
+    context = "\n\n---\n\n".join(
+        f"[{number}] {chunk.text}"
+        for number, chunk in enumerate(relevant_chunks, start=1)
+    )
 
     answer = generate_answer(
         llm_client=llm_client,
         model_name=GENERATION_MODEL_NAME,
         context=context,
         query=rewritten_query,
+        language=language,
+        previous_answer=previous_answer,
     )
+
+    answer, used_numbers = split_used_passages(answer, len(relevant_chunks))
 
     if not answer:
         answer = (
@@ -588,10 +640,20 @@ def answer_question(
             "Try another non-reasoning instruction model."
         )
 
-    sources = sorted({chunk.source for chunk in relevant_chunks})
+    if answer.strip() in non_answers:
+        sources: list[str] = []
+    else:
+        # Show only the passages the model says it used; if it did not report
+        # any (format not followed), fall back to every retrieved passage.
+        used_chunks = (
+            [relevant_chunks[number - 1] for number in used_numbers]
+            if used_numbers
+            else relevant_chunks
+        )
+        sources = sorted({source_label(chunk) for chunk in used_chunks})
+
     memory.add(query, rewritten_query, answer)
     return answer, sources
-
 
 def main() -> None:
     llm_client, embedding_model, qdrant_client = load_clients()

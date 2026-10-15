@@ -25,6 +25,11 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+/* Let each paragraph resolve its own text direction, so English
+   punctuation lands at the correct end of the sentence. */
+.stChatMessage p, .stChatMessage li, .stCaption p {
+    unicode-bidi: plaintext;
+}
 
 
 @st.cache_resource(show_spinner="Setting up (loading embedding model, indexing files)...")

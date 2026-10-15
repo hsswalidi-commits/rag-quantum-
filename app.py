@@ -170,7 +170,17 @@ def clean_model_answer(content) -> str:
     return text.strip()
 
 
-def build_prompt(context: str, query: str) -> str:
+def build_prompt(
+    context: str, query: str, previous_answer: str | None = None
+) -> str:
+    follow_up_note = ""
+    if previous_answer:
+        follow_up_note = (
+            "\nThis is a follow-up question. The user already received the "
+            "previous answer below. Do not repeat it. Add new details from the "
+            "context that it did not cover. If the context has nothing new, "
+            "say so briefly.\n\nPREVIOUS ANSWER:\n" + previous_answer + "\n"
+        )
     return f"""
 Use only the supplied context to answer the question.
 
@@ -186,7 +196,7 @@ Instructions:
 
 CONTEXT:
 {context}
-
+{follow_up_note}
 QUESTION:
 {query}
 """.strip()
@@ -324,9 +334,15 @@ def _call_generation_model(
 
 
 def generate_answer(
-    llm_client: OpenAI, model_name: str, context: str, query: str
+    llm_client: OpenAI,
+    model_name: str,
+    context: str,
+    query: str,
+    previous_answer: str | None = None,
 ) -> str:
-    prompt = build_prompt(context=context, query=query)
+    prompt = build_prompt(
+        context=context, query=query, previous_answer=previous_answer
+    )
 
     response = _call_generation_model(
         llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS
@@ -588,11 +604,17 @@ def answer_question(
 
     context = "\n\n---\n\n".join(chunk.text for chunk in relevant_chunks)
 
+    # لو السؤال متابعة (انعاد صياغته)، نعطي النموذج الجواب السابق عشان ما يكرره.
+    previous_answer = (
+        memory.turns[-1].answer if memory.turns and rewritten_query != query else None
+    )
+
     answer = generate_answer(
         llm_client=llm_client,
         model_name=GENERATION_MODEL_NAME,
         context=context,
         query=rewritten_query,
+        previous_answer=previous_answer,
     )
 
     if not answer:
