@@ -168,39 +168,58 @@ def clean_model_answer(content) -> str:
 
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+    
+NO_MORE_MESSAGES = {
+    "Arabic": "هذا كل ما لدي عن هذا الموضوع في المصادر المتوفرة.",
+    "English": "That is everything I have on this topic in the available sources.",
+}
 
 
 def build_prompt(
-    context: str, query: str, previous_answer: str | None = None
+    context: str, query: str, language: str, previous_answer: str | None = None
 ) -> str:
-    follow_up_note = ""
+    no_answer = NO_ANSWER_MESSAGES[language]
+    no_more = NO_MORE_MESSAGES[language]
+
+    # For follow-ups ("tell me more"), show the model what it already said so
+    # it adds new details instead of paraphrasing the same answer.
+    follow_up_block = ""
     if previous_answer:
-        follow_up_note = (
-            "\nThis is a follow-up question. The user already received the "
-            "previous answer below. Do not repeat it. Add new details from the "
-            "context that it did not cover. If the context has nothing new, "
-            "say so briefly.\n\nPREVIOUS ANSWER:\n" + previous_answer + "\n"
-        )
+        follow_up_block = f"""
+This is a follow-up question. The user already received this answer:
+<previous_answer>
+{previous_answer}
+</previous_answer>
+Do not repeat what it already says. Add only new details found in the context.
+If the context has nothing new, reply with exactly this sentence:
+"{no_more}"
+"""
+
     return f"""
 Use only the supplied context to answer the question.
 
 Instructions:
 - Return only the final answer, nothing else.
 - Do not explain your reasoning or the retrieval process.
-- If the answer is not available in the context, say:
-  "The answer is not available in the provided context."
-- Answer in the same language as the user's question.
+- Write the answer in {language}, even if the context is in another language.
+- If the answer is not available in the context, reply with exactly this sentence:
+  "{no_answer}"
 - Give a complete answer: at least 2-3 full sentences when the context
   supports it. Avoid single-word or single-phrase answers unless the
   question explicitly asks for a short list or a yes/no.
-
+- The context is split into numbered passages like [1], [2]. After the answer,
+  add one last line in exactly this format: USED: 1, 3
+  listing only the numbers of the passages you actually used. This line is
+  required output, not commentary. Do not mention passage numbers anywhere
+  else, and do not add this line when you reply with one of the exact
+  sentences above.
+{follow_up_block}
 CONTEXT:
 {context}
-{follow_up_note}
+
 QUESTION:
 {query}
 """.strip()
-
 
 def looks_like_followup(question: str) -> bool:
     """

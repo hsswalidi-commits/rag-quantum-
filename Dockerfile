@@ -9,7 +9,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY knowledge_base ./knowledge_base
-COPY app.py storage.py conversations.db ./
+COPY app.py storage.py  ./
 
 
 RUN uv sync
