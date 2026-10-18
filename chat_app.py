@@ -24,13 +24,14 @@ st.markdown(
     </style>
     """,
     unsafe_allow_html=True,
-)
+css = """
 /* Let each paragraph resolve its own text direction, so English
    punctuation lands at the correct end of the sentence. */
 .stChatMessage p, .stChatMessage li, .stCaption p {
     unicode-bidi: plaintext;
 }
-
+"""
+st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 @st.cache_resource(show_spinner="Setting up (loading embedding model, indexing files)...")
 def get_clients():
