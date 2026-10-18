@@ -13,7 +13,6 @@ from app import (
     RETRIEVAL_LIMIT,
     SIMILARITY_THRESHOLD,
 )
-
 st.set_page_config(page_title="Quantum Knowledge Assistant", page_icon="🧠", layout="wide")
 
 # Simple right-to-left styling for the Arabic content areas.
@@ -23,7 +22,9 @@ st.markdown(
     .stChatMessage, .stMarkdown, .stCaption { direction: rtl; text-align: right; }
     </style>
     """,
-    unsafe_allow_html=True,
+    unsafe_allow_html=True
+)
+
 css = """
 /* Let each paragraph resolve its own text direction, so English
    punctuation lands at the correct end of the sentence. */
@@ -31,6 +32,7 @@ css = """
     unicode-bidi: plaintext;
 }
 """
+
 st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 @st.cache_resource(show_spinner="Setting up (loading embedding model, indexing files)...")
