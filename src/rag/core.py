@@ -34,12 +34,7 @@ VECTOR_SIZE = 384
 
 KNOWLEDGE_BASE_DIR = os.getenv("KNOWLEDGE_BASE_DIR", "knowledge_base")
 KNOWLEDGE_FILE_EXTENSIONS = (".md", ".txt", ".pdf")
-def save_uploaded_file(filename: str, content: bytes) -> Path:
-    kb_dir = Path(KNOWLEDGE_BASE_DIR)
-    kb_dir.mkdir(parents=True, exist_ok=True)
-    target = kb_dir / Path(filename).name
-    target.write_bytes(content)
-    return target
+
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 2
 
@@ -87,17 +82,25 @@ class RetrievedChunk:
     text: str
     source: str
     score: float
-@dataclass
-class RetrievedChunk:
-    text: str
-    source: str
-    score: float
+    # حقول التشخيص (تستخدمها واجهة chat_app). لها قيم افتراضية
+    # عشان البحث الدلالي العادي يشتغل بدونها.
+    via: str = "semantic"
+    semantic_rank: int | None = None
+    bm25_rank: int | None = None
+    bm25_score: float = 0.0
 
 
-def clean_model_answer(content) -> str:
-    if content is None:
-        return ""
-    ...
+def source_label(chunk: RetrievedChunk) -> str:
+    """اسم الملف فقط بدون المسار."""
+    return os.path.basename(str(chunk.source))
+
+
+def _no_context_message(query: str) -> str:
+    """رسالة الرفض لما ما يوجد سياق مناسب، بلغة السؤال."""
+    if re.search(r"[\u0600-\u06FF]", query):
+        return "الإجابة غير متوفرة في السياق المتاح."
+    return "The answer is not available in the provided context."
+
 
 def clean_model_answer(content) -> str:
     if content is None:
@@ -117,7 +120,6 @@ def clean_model_answer(content) -> str:
 
     text = str(content).strip()
 
-    
     text = re.sub(
         r"<think\b[^>]*>.*?</think\s*>", "", text, flags=re.IGNORECASE | re.DOTALL
     )
@@ -156,23 +158,52 @@ def clean_model_answer(content) -> str:
 
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+    
+NO_MORE_MESSAGES = {
+    "Arabic": "هذا كل ما لدي عن هذا الموضوع في المصادر المتوفرة.",
+    "English": "That is everything I have on this topic in the available sources.",
+}
 
 
+def build_prompt(
+    context: str, query: str, language: str, previous_answer: str | None = None
+) -> str:
+    no_answer = NO_ANSWER_MESSAGES[language]
+    no_more = NO_MORE_MESSAGES[language]
 
-def build_prompt(context: str, query: str) -> str:
+    # For follow-ups ("tell me more"), show the model what it already said so
+    # it adds new details instead of paraphrasing the same answer.
+    follow_up_block = ""
+    if previous_answer:
+        follow_up_block = f"""
+This is a follow-up question. The user already received this answer:
+<previous_answer>
+{previous_answer}
+</previous_answer>
+Do not repeat what it already says. Add only new details found in the context.
+If the context has nothing new, reply with exactly this sentence:
+"{no_more}"
+"""
+
     return f"""
 Use only the supplied context to answer the question.
 
 Instructions:
 - Return only the final answer, nothing else.
 - Do not explain your reasoning or the retrieval process.
-- If the answer is not available in the context, say:
-  "The answer is not available in the provided context."
-- - Answer in the same language as the user's question.
+- Write the answer in {language}, even if the context is in another language.
+- If the answer is not available in the context, reply with exactly this sentence:
+  "{no_answer}"
 - Give a complete answer: at least 2-3 full sentences when the context
   supports it. Avoid single-word or single-phrase answers unless the
   question explicitly asks for a short list or a yes/no.
-
+- The context is split into numbered passages like [1], [2]. After the answer,
+  add one last line in exactly this format: USED: 1, 3
+  listing only the numbers of the passages you actually used. This line is
+  required output, not commentary. Do not mention passage numbers anywhere
+  else, and do not add this line when you reply with one of the exact
+  sentences above.
+{follow_up_block}
 CONTEXT:
 {context}
 
@@ -213,7 +244,6 @@ def rewrite_query(
     if not history:
         return current_question
 
-  
     if not looks_like_followup(current_question) and len(current_question.split()) > 4:
         return current_question
 
@@ -254,7 +284,6 @@ def rewrite_query(
         return rewritten or current_question
 
     except Exception:
-   
         return current_question
 
 
@@ -276,7 +305,7 @@ def retrieve_context(
     )
 
     results = []
-    for result in search_response.points:
+    for rank, result in enumerate(search_response.points, start=1):
         payload = result.payload or {}
         text = payload.get("text")
         if text and result.score >= threshold:
@@ -285,6 +314,8 @@ def retrieve_context(
                     text=text,
                     source=payload.get("source", "unknown"),
                     score=result.score,
+                    via="semantic",
+                    semantic_rank=rank,
                 )
             )
 
@@ -316,28 +347,20 @@ def generate_answer(
     model_name: str,
     context: str,
     query: str,
-    language: str,
     previous_answer: str | None = None,
 ) -> str:
     prompt = build_prompt(
-        context=context,
-        query=query,
-        language=language,
-        previous_answer=previous_answer,
+        context=context, query=query, previous_answer=previous_answer
     )
 
     response = _call_generation_model(
-        llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS, language=language
+        llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS
     )
     answer = clean_model_answer(response.choices[0].message.content)
 
     if not answer:
         retry_response = _call_generation_model(
-            llm_client,
-            model_name,
-            prompt,
-            max_tokens=ANSWER_MAX_TOKENS_RETRY,
-            language=language,
+            llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS_RETRY
         )
         answer = clean_model_answer(retry_response.choices[0].message.content)
 
@@ -356,7 +379,6 @@ def load_clients() -> tuple[OpenAI, HuggingFaceEmbeddings, QdrantClient]:
             "Missing environment variables: " + ", ".join(missing_variables)
         )
 
-    
     llm_client = OpenAI(
         base_url=OPENROUTER_BASE_URL, api_key=os.getenv("OPENROUTER_API_KEY")
     )
@@ -367,6 +389,7 @@ def load_clients() -> tuple[OpenAI, HuggingFaceEmbeddings, QdrantClient]:
 
     return llm_client, embedding_model, qdrant_client
 
+
 def _stable_point_id(source: str, chunk_index: int, chunk: str) -> str:
     """معرف ثابت مبني على المصدر وترتيب القطعة ومحتواها."""
     digest = hashlib.sha256(f"{source}:{chunk_index}:{chunk}".encode("utf-8")).hexdigest()
@@ -375,6 +398,7 @@ def _stable_point_id(source: str, chunk_index: int, chunk: str) -> str:
 
 def _file_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
 
 def _load_source_files(directory: str) -> dict[str, str]:
     """تحميل محتوى ملفات .md و .txt و .pdf من مجلد قاعدة المعرفة."""
@@ -557,24 +581,6 @@ def ingest_knowledge_base(
     else:
         print(f"اكتملت الفهرسة: {total_new_chunks} قطعة جديدة/محدَّثة.")
 
-        
-_USED_LINE = re.compile(
-    r"(?:^|\n)[ \t*_]*USED[ \t*_]*:[ \t*_]*([^\n]*)\s*$", re.IGNORECASE
-)
-
-
-def split_used_passages(answer: str, passage_count: int) -> tuple[str, list[int]]:
-    """Strip the trailing 'USED: 1, 3' line the model appends. Returns the
-    cleaned answer and the valid passage numbers it reported (an empty list
-    if the line is missing or unusable)."""
-    match = _USED_LINE.search(answer)
-    if not match:
-        return answer.strip(), []
-
-    reported = {int(number) for number in re.findall(r"\d+", match.group(1))}
-    valid = sorted(number for number in reported if 1 <= number <= passage_count)
-    return answer[: match.start()].strip(), valid
-
 
 def answer_question(
     llm_client: OpenAI,
@@ -583,8 +589,6 @@ def answer_question(
     query: str,
     memory: ConversationMemory,
 ) -> tuple[str, list[str]]:
-    language = detect_language(query)
-
     rewritten_query = rewrite_query(
         llm_client=llm_client,
         model_name=GENERATION_MODEL_NAME,
@@ -607,20 +611,11 @@ def answer_question(
         memory.add(query, rewritten_query, answer)
         return answer, []
 
-    # A rewritten query means this was a follow-up ("tell me more"). Pass the
-    # last real answer so the model adds new details instead of repeating it.
-    non_answers = set(NO_ANSWER_MESSAGES.values()) | set(NO_MORE_MESSAGES.values())
-    previous_answer = None
-    if rewritten_query != query:
-        for turn in reversed(memory.turns):
-            if turn.answer not in non_answers:
-                previous_answer = turn.answer
-                break
+    context = "\n\n---\n\n".join(chunk.text for chunk in relevant_chunks)
 
-    # Number the passages so the model can report which ones it used.
-    context = "\n\n---\n\n".join(
-        f"[{number}] {chunk.text}"
-        for number, chunk in enumerate(relevant_chunks, start=1)
+    # لو السؤال متابعة (انعاد صياغته)، نعطي النموذج الجواب السابق عشان ما يكرره.
+    previous_answer = (
+        memory.turns[-1].answer if memory.turns and rewritten_query != query else None
     )
 
     answer = generate_answer(
@@ -628,11 +623,8 @@ def answer_question(
         model_name=GENERATION_MODEL_NAME,
         context=context,
         query=rewritten_query,
-        language=language,
         previous_answer=previous_answer,
     )
-
-    answer, used_numbers = split_used_passages(answer, len(relevant_chunks))
 
     if not answer:
         answer = (
@@ -640,20 +632,10 @@ def answer_question(
             "Try another non-reasoning instruction model."
         )
 
-    if answer.strip() in non_answers:
-        sources: list[str] = []
-    else:
-        # Show only the passages the model says it used; if it did not report
-        # any (format not followed), fall back to every retrieved passage.
-        used_chunks = (
-            [relevant_chunks[number - 1] for number in used_numbers]
-            if used_numbers
-            else relevant_chunks
-        )
-        sources = sorted({source_label(chunk) for chunk in used_chunks})
-
+    sources = sorted({chunk.source for chunk in relevant_chunks})
     memory.add(query, rewritten_query, answer)
     return answer, sources
+
 
 def main() -> None:
     llm_client, embedding_model, qdrant_client = load_clients()
@@ -692,7 +674,7 @@ def main() -> None:
         except Exception as error:
             error_text = str(error)
             if "402" in error_text or "Payment Required" in error_text:
-                print(""" """  """ """
+                print(
                     "\nAn error occurred: OpenRouter usage credits are "
                     "depleted for this account. Add credits, then try again."
                 )

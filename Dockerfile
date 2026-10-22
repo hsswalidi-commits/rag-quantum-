@@ -1,14 +1,29 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    HF_HOME=/home/app/.cache/huggingface \
+    PORT=8080
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN useradd --create-home --shell /usr/sbin/nologin app
 
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY knowledge_base ./knowledge_base
-COPY app.py storage.py chat_app.py ./
+COPY main.py ./
 
-EXPOSE 10000
+RUN pip install --no-cache-dir uv \
+    && uv sync --frozen --no-dev \
+    && mkdir -p "$HF_HOME" \
+    && chown -R app:app /app /home/app
 
-CMD ["streamlit", "run", "chat_app.py", "--server.port=10000", "--server.address=0.0.0.0"]
+ENV PATH="/app/.venv/bin:$PATH"
+
+USER app
+EXPOSE 8080
+
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"]

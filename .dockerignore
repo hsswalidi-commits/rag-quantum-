@@ -1,0 +1,15 @@
+.git
+.venv
+.env
+.streamlit
+__pycache__
+*.py[cod]
+*.db
+test_qdrant.py
+app_backup.py
+eval_*.csv
+eval_*.json
+compare_embeddings.py
+debug_q7.py
+check_setup.py
+run_eval.py

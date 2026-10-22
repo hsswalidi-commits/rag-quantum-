@@ -1,6 +1,8 @@
 .env
-__pycache__/
 .venv/
-.streamlit/secrets.toml
+__pycache__/
+*.py[cod]
+*.db
 conversations*
-*.dbapp_backup.py
+.streamlit/secrets.toml
+test_qdrant.py
