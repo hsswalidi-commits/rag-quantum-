@@ -6,3 +6,11 @@ __pycache__/
 conversations*
 .streamlit/secrets.toml
 test_qdrant.py
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json

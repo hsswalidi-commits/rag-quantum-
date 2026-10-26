@@ -25,9 +25,9 @@ load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-COLLECTION_NAME = "client"
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "client")
 EMBEDDING_MODEL_NAME = os.getenv(
-    "EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"
+    "EMBEDDING_MODEL_NAME", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 )
 GENERATION_MODEL_NAME = os.getenv("GENERATION_MODEL_NAME", "qwen/qwen-2.5-72b-instruct")
 VECTOR_SIZE = 384
@@ -36,11 +36,11 @@ KNOWLEDGE_BASE_DIR = os.getenv("KNOWLEDGE_BASE_DIR", "knowledge_base")
 KNOWLEDGE_FILE_EXTENSIONS = (".md", ".txt", ".pdf")
 
 CHUNK_SIZE = 400
-CHUNK_OVERLAP = 2
+CHUNK_OVERLAP = 60
 
 
 SIMILARITY_THRESHOLD = 0.30
-RETRIEVAL_LIMIT = 6
+RETRIEVAL_LIMIT = 4
 
 
 ANSWER_MAX_TOKENS = 600
@@ -98,8 +98,14 @@ def source_label(chunk: RetrievedChunk) -> str:
 def _no_context_message(query: str) -> str:
     """رسالة الرفض لما ما يوجد سياق مناسب، بلغة السؤال."""
     if re.search(r"[\u0600-\u06FF]", query):
-        return "الإجابة غير متوفرة في السياق المتاح."
+        return "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي."
     return "The answer is not available in the provided context."
+
+
+def detect_language(text: str) -> str:
+    arabic = len(re.findall(r"[\u0621-\u064A\u066E-\u06D3]", text))
+    latin = len(re.findall(r"[A-Za-z]", text))
+    return "Arabic" if arabic > latin else "English"
 
 
 def clean_model_answer(content) -> str:
@@ -522,7 +528,7 @@ def ingest_knowledge_base(
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", ". ", " ", ""],
+    separators=["\n\n", "\n", "؟ ", ". ", "؛ ", "! ", " ", ""],
     )
 
     total_new_chunks = 0

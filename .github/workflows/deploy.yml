@@ -1,0 +1,140 @@
+name: Build and deploy RAG API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rag-agent-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    env:
+      PROJECT_ID: leap-coop
+      REGION: me-central1
+      SERVICE: rag-agent-app
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          create_credentials_file: true
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.0
+
+      - name: Check required GitHub secrets
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          API_BEARER_TOKEN: ${{ secrets.API_BEARER_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in OPENROUTER_API_KEY QDRANT_API_KEY QDRANT_URL API_BEARER_TOKEN; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required GitHub secret is missing: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Terraform initialize
+        working-directory: terraform
+        run: terraform init -input=false
+
+      # Create the registry and Secret Manager metadata before pushing images
+      # or uploading secret payloads. No secret values enter Terraform/state.
+      - name: Bootstrap cloud resources
+        working-directory: terraform
+        run: |
+          terraform apply -input=false -auto-approve \
+            -target=google_project_service.required \
+            -target=google_artifact_registry_repository.app \
+            -target=google_service_account.runtime \
+            -target=google_secret_manager_secret.runtime \
+            -target=google_secret_manager_secret_iam_member.runtime_access \
+            -var="image=${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:bootstrap"
+
+      - name: Configure Artifact Registry Docker auth
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:${GITHUB_SHA}"
+          docker build --pull --tag "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub secrets to Secret Manager
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          API_BEARER_TOKEN: ${{ secrets.API_BEARER_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$OPENROUTER_API_KEY" | gcloud secrets versions add rag-openrouter-api-key --data-file=- --project "$PROJECT_ID" >/dev/null
+          printf '%s' "$QDRANT_API_KEY" | gcloud secrets versions add rag-qdrant-api-key --data-file=- --project "$PROJECT_ID" >/dev/null
+          printf '%s' "$QDRANT_URL" | gcloud secrets versions add rag-qdrant-url --data-file=- --project "$PROJECT_ID" >/dev/null
+          printf '%s' "$API_BEARER_TOKEN" | gcloud secrets versions add rag-api-bearer-token --data-file=- --project "$PROJECT_ID" >/dev/null
+
+      - name: Read current secret version identifiers
+        id: secret_versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest_version() {
+            gcloud secrets versions list "$1" --project "$PROJECT_ID" \
+              --filter="state=ENABLED" --sort-by="~createTime" --limit=1 \
+              --format="value(name)" | sed 's#^.*/##'
+          }
+          echo "openrouter=$(latest_version rag-openrouter-api-key)" >> "$GITHUB_OUTPUT"
+          echo "qdrant_key=$(latest_version rag-qdrant-api-key)" >> "$GITHUB_OUTPUT"
+          echo "qdrant_url=$(latest_version rag-qdrant-url)" >> "$GITHUB_OUTPUT"
+          echo "api_token=$(latest_version rag-api-bearer-token)" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform validate and plan
+        working-directory: terraform
+        env:
+          TF_VAR_image: ${{ steps.image.outputs.image }}
+          TF_VAR_runtime_secret_versions: '{"openrouter":"${{ steps.secret_versions.outputs.openrouter }}","qdrant_key":"${{ steps.secret_versions.outputs.qdrant_key }}","qdrant_url":"${{ steps.secret_versions.outputs.qdrant_url }}","api_token":"${{ steps.secret_versions.outputs.api_token }}"}'
+        run: |
+          terraform fmt -check -recursive
+          terraform validate
+          terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        working-directory: terraform
+        env:
+          TF_VAR_image: ${{ steps.image.outputs.image }}
+          TF_VAR_runtime_secret_versions: '{"openrouter":"${{ steps.secret_versions.outputs.openrouter }}","qdrant_key":"${{ steps.secret_versions.outputs.qdrant_key }}","qdrant_url":"${{ steps.secret_versions.outputs.qdrant_url }}","api_token":"${{ steps.secret_versions.outputs.api_token }}"}'
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Show service URL
+        working-directory: terraform
+        run: terraform output -raw service_url
