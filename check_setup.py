@@ -1,107 +1,49 @@
-"""
-شغّله من نفس مجلد المشروع:   python check_setup.py
-يتأكد إن الملفات الجديدة انتقلت صح، والمكتبات منصّبة، والمنطق الأساسي يشتغل.
-ما يتصل بـQdrant ولا OpenRouter ولا يغيّر أي شي.
-"""
-import importlib
-import os
+"""Offline smoke check for the FastAPI package and retrieval helpers."""
+from __future__ import annotations
+
 import py_compile
 import sys
+from pathlib import Path
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, PROJECT_DIR)
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "src"))
 
 failures = 0
 
 
-def report(ok: bool, message: str) -> None:
+def report(ok: bool, description: str) -> None:
     global failures
-    if not ok:
-        failures += 1
-    print(("✅ " if ok else "❌ ") + message)
+    failures += int(not ok)
+    print(("PASS " if ok else "FAIL ") + description)
 
 
-# 1) الملفات موجودة وما فيها أخطاء صياغة (مثل مشكلة الـIndentation)
-print("\n[1] الملفات")
-for filename in ["app.py", "chat_app.py", "hybrid.py", "storage.py"]:
-    path = os.path.join(PROJECT_DIR, filename)
-    if not os.path.exists(path):
-        report(False, f"{filename} غير موجود")
-        continue
+print("[1] Source syntax")
+for relative in ("main.py", "src/rag/api.py", "src/rag/core.py", "src/rag/hybrid.py", "src/rag/ingest.py"):
+    path = ROOT / relative
     try:
-        py_compile.compile(path, doraise=True)
-        report(True, f"{filename} موجود وصياغته سليمة")
+        py_compile.compile(str(path), doraise=True)
+        report(True, relative)
     except py_compile.PyCompileError as error:
-        report(False, f"{filename} فيه خطأ صياغة: {error.msg}")
+        report(False, f"{relative}: {error.msg}")
 
-# 2) علامات تثبت إن النسخة الجديدة هي اللي موجودة
-print("\n[2] هل هذي النسخ الجديدة؟")
-markers = {
-    "app.py": [
-        "import hybrid",
-        "CHUNK_OVERLAP = 60",
-        "def _no_context_message",
-        "def detect_language",
-        "def save_uploaded_file",
-        "HYBRID_SEARCH =",
-        "duplicate_source",
-        "paraphrase-multilingual-MiniLM-L12-v2",
-    ],
-    "chat_app.py": ["file_uploader", "save_uploaded_file", "source_label", "SIMILARITY_THRESHOLD"],
-    "hybrid.py": ["def rrf_fuse", "def tokenize", "def invalidate"],
-}
-for filename, needed in markers.items():
-    path = os.path.join(PROJECT_DIR, filename)
-    if not os.path.exists(path):
-        continue
-    with open(path, "r", encoding="utf-8") as file_handle:
-        content = file_handle.read()
-    for marker in needed:
-        report(marker in content, f"{filename}: «{marker}»")
-
-# 3) المكتبات
-print("\n[3] المكتبات")
-for package in [
-    "streamlit",
-    "pypdf",
-    "rank_bm25",
-    "qdrant_client",
-    "langchain_text_splitters",
-    "langchain_huggingface",
-    "openai",
-    "dotenv",
-]:
-    try:
-        importlib.import_module(package)
-        report(True, package)
-    except ImportError:
-        install_name = {"rank_bm25": "rank-bm25", "dotenv": "python-dotenv"}.get(package, package)
-        report(False, f"{package} غير منصّبة  →  pip install {install_name}")
-
-# 4) اختبار المنطق (بدون إنترنت)
-print("\n[4] اختبار المنطق")
+print("[2] Retrieval behavior (no network)")
 try:
-    import hybrid
+    from rag import core, hybrid
 
-    tokens = hybrid.tokenize("ما هي بوابة CNOT؟")
-    report("cnot" in tokens and not any("؟" in t for t in tokens), f"tokenize → {tokens}")
-
+    report(core.detect_language("ما هي بوابة CNOT؟") == "Arabic", "Arabic question language")
+    report(core.detect_language("What is a qubit?") == "English", "English question language")
+    report("cnot" in hybrid.tokenize("ما هي بوابة CNOT؟"), "tokenization")
     fused = hybrid.rrf_fuse(["a", "b"], ["b", "c"])
-    report(max(fused, key=fused.get) == "b", "rrf_fuse: القطعة اللي بالقائمتين تفوز")
-except Exception as error:
-    report(False, f"hybrid.py: {error}")
+    report(max(fused, key=fused.get) == "b", "reciprocal rank fusion")
+    report("multilingual" in core.EMBEDDING_MODEL_NAME.lower(), "multilingual embedding default")
+except ImportError as error:
+    report(False, f"backend dependencies unavailable: {type(error).__name__}")
 
-try:
-    import app
+print("[3] Deployment invariants")
+core_text = (ROOT / "src/rag/core.py").read_text(encoding="utf-8")
+api_text = (ROOT / "src/rag/api.py").read_text(encoding="utf-8")
+report("delete_collection(" not in core_text, "ingestion does not delete Qdrant collections")
+report("load_clients" in api_text and "ingest_knowledge_base" not in api_text, "API starts without ingestion")
 
-    report(app.detect_language("ما هي بوابة CNOT؟") == "Arabic", "detect_language: عربي")
-    report(app.detect_language("What is a qubit?") == "English", "detect_language: إنجليزي")
-    report(app._no_context_message("وش هو الكيوبت؟") != app._no_context_message("What is a qubit?"),
-           "رسالة الرفض تتغير حسب لغة السؤال")
-    report(app.CHUNK_OVERLAP >= 20, f"CHUNK_OVERLAP = {app.CHUNK_OVERLAP}")
-    report("multilingual" in app.EMBEDDING_MODEL_NAME.lower(),
-           f"موديل الـembeddings = {app.EMBEDDING_MODEL_NAME}")
-except Exception as error:
-    report(False, f"استيراد app.py فشل: {error}")
-
-print("\n" + ("كل شي تمام ✅" if failures == 0 else f"فيه {failures} مشكلة ❌ - راجع السطور اللي فيها ❌ فوق"))
+print("PASS all checks" if failures == 0 else f"FAIL {failures} check(s)")
+raise SystemExit(1 if failures else 0)

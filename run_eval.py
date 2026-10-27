@@ -7,7 +7,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 # in_scope = لازم يجاوب | out_of_scope = لازم يرفض
 # "new_conversation": False = سؤال متابعة للسؤال اللي قبله
@@ -44,7 +44,7 @@ def main() -> None:
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
-    import app
+    from rag import core as app
 
     if args.no_hybrid:
         app.HYBRID_SEARCH = False
@@ -78,7 +78,7 @@ def main() -> None:
                 query=question,
                 memory=memory,
             )
-        except Exception as exc:  # نكمل بقية الأسئلة حتى لو واحد فشل
+        except Exception as exc:  # noqa: BLE001 - continue the evaluation after an item failure
             answer, sources, error = "", [], str(exc)
 
         refused = answer.strip() in refusals

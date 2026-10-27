@@ -60,6 +60,12 @@ variable "max_instances" {
   default     = 3
 }
 
+variable "monitoring_notification_channels" {
+  description = "Cloud Monitoring notification channel resource names. Configure email or incident channels in Cloud Monitoring and pass their full resource names here."
+  type        = list(string)
+  default     = []
+}
+
 provider "google" {
   project = var.project_id
   region  = var.region
@@ -91,6 +97,7 @@ resource "google_project_service" "required" {
     "run.googleapis.com",
     "artifactregistry.googleapis.com",
     "secretmanager.googleapis.com",
+    "monitoring.googleapis.com",
   ])
 
   project            = var.project_id
@@ -163,12 +170,62 @@ resource "google_cloud_run_v2_service" "app" {
           cpu    = "2"
           memory = "4Gi"
         }
-        cpu_idle = true
+        cpu_idle          = true
+        startup_cpu_boost = true
+      }
+
+      startup_probe {
+        initial_delay_seconds = 0
+        timeout_seconds       = 2
+        period_seconds        = 10
+        failure_threshold     = 18
+        http_get {
+          path = "/readyz"
+          port = 8080
+        }
+      }
+
+      liveness_probe {
+        timeout_seconds   = 2
+        period_seconds    = 30
+        failure_threshold = 3
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
       }
 
       env {
         name  = "COLLECTION_NAME"
         value = "client"
+      }
+      env {
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+      env {
+        name  = "EMBEDDING_MODEL_NAME"
+        value = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+      }
+      env {
+        name  = "GENERATION_MODEL_NAME"
+        value = "qwen/qwen-2.5-72b-instruct"
+      }
+      env {
+        name  = "QDRANT_TIMEOUT_SECONDS"
+        value = "10"
+      }
+      env {
+        name  = "OPENROUTER_TIMEOUT_SECONDS"
+        value = "45"
+      }
+      env {
+        name  = "MAX_HISTORY_CHARS"
+        value = "12000"
+      }
+      env {
+        name  = "RATE_LIMIT_PER_MINUTE"
+        value = "20"
       }
       env {
         name  = "ENABLE_DOCS"
@@ -206,6 +263,57 @@ resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
   name     = google_cloud_run_v2_service.app.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+resource "google_monitoring_alert_policy" "api_5xx" {
+  project               = var.project_id
+  display_name          = "RAG API returned a 5xx response"
+  combiner              = "OR"
+  notification_channels = var.monitoring_notification_channels
+  enabled               = true
+
+  conditions {
+    display_name = "Cloud Run request returned HTTP 5xx"
+    condition_matched_log {
+      filter = <<-EOT
+        resource.type="cloud_run_revision"
+        resource.labels.service_name="rag-agent-app"
+        jsonPayload.event="http_request_complete"
+        jsonPayload.status_code >= 500
+      EOT
+    }
+  }
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
+  depends_on = [google_project_service.required]
+}
+
+resource "google_monitoring_alert_policy" "readiness_failure" {
+  project               = var.project_id
+  display_name          = "RAG API is not ready"
+  combiner              = "OR"
+  notification_channels = var.monitoring_notification_channels
+  enabled               = true
+
+  conditions {
+    display_name = "Qdrant readiness check failed"
+    condition_matched_log {
+      filter = <<-EOT
+        resource.type="cloud_run_revision"
+        resource.labels.service_name="rag-agent-app"
+        (jsonPayload.event="readiness_check_failed" OR jsonPayload.event="readiness_collection_missing")
+      EOT
+    }
+  }
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
+
+  depends_on = [google_project_service.required]
 }
 
 output "service_url" {

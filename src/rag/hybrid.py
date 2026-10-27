@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 import re
+import threading
 from dataclasses import dataclass
+
 from rank_bm25 import BM25Okapi
 
 RRF_K = 60
@@ -102,17 +105,25 @@ def build_index(qdrant_client, collection_name: str) -> BM25Index:
     return BM25Index(chunks)
 
 
-_index: BM25Index | None = None
+_indexes: dict[tuple[int, str], BM25Index] = {}
+_index_lock = threading.RLock()
 
 
-def invalidate() -> None:
-    """يُستدعى بعد أي فهرسة، عشان ينعاد بناء فهرس الكلمات عند أول سؤال."""
-    global _index
-    _index = None
+def invalidate(collection_name: str | None = None) -> None:
+    """Invalidate BM25 caches after ingestion; safe with concurrent API calls."""
+    with _index_lock:
+        if collection_name is None:
+            _indexes.clear()
+        else:
+            for key in [key for key in _indexes if key[1] == collection_name]:
+                _indexes.pop(key, None)
 
 
 def get_index(qdrant_client, collection_name: str) -> BM25Index:
-    global _index
-    if _index is None:
-        _index = build_index(qdrant_client, collection_name)
-    return _index
+    key = (id(qdrant_client), collection_name)
+    with _index_lock:
+        index = _indexes.get(key)
+        if index is None:
+            index = build_index(qdrant_client, collection_name)
+            _indexes[key] = index
+        return index

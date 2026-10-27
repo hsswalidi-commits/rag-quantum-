@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -9,19 +10,25 @@ from uuid import NAMESPACE_URL, uuid5
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from openai import OpenAI
+from openai import APIError, OpenAI
 from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     VectorParams,
 )
 
+from rag.hybrid import get_index, invalidate, rrf_fuse
+from rag.observability import log_event
+
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -37,10 +44,15 @@ KNOWLEDGE_FILE_EXTENSIONS = (".md", ".txt", ".pdf")
 
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 60
+CHUNK_FORMAT_VERSION = 1
+CHUNK_SEPARATORS = ["\n\n", "\n", "؟ ", ". ", "؛ ", "! ", " ", ""]
 
 
 SIMILARITY_THRESHOLD = 0.30
 RETRIEVAL_LIMIT = 4
+SEMANTIC_CANDIDATE_LIMIT = 20
+BM25_CANDIDATE_LIMIT = 20
+HYBRID_SEARCH = os.getenv("HYBRID_SEARCH", "1").strip().lower() not in {"0", "false", "no"}
 
 
 ANSWER_MAX_TOKENS = 600
@@ -82,22 +94,25 @@ class RetrievedChunk:
     text: str
     source: str
     score: float
+    page: int | None = None
     # حقول التشخيص (تستخدمها واجهة chat_app). لها قيم افتراضية
     # عشان البحث الدلالي العادي يشتغل بدونها.
     via: str = "semantic"
     semantic_rank: int | None = None
     bm25_rank: int | None = None
     bm25_score: float = 0.0
+    fusion_score: float = 0.0
 
 
 def source_label(chunk: RetrievedChunk) -> str:
     """اسم الملف فقط بدون المسار."""
-    return os.path.basename(str(chunk.source))
+    label = os.path.basename(str(chunk.source))
+    return f"{label} (ص {chunk.page})" if chunk.page is not None else label
 
 
 def _no_context_message(query: str) -> str:
     """رسالة الرفض لما ما يوجد سياق مناسب، بلغة السؤال."""
-    if re.search(r"[\u0600-\u06FF]", query):
+    if detect_language(query) == "Arabic":
         return "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي."
     return "The answer is not available in the provided context."
 
@@ -106,6 +121,12 @@ def detect_language(text: str) -> str:
     arabic = len(re.findall(r"[\u0621-\u064A\u066E-\u06D3]", text))
     latin = len(re.findall(r"[A-Za-z]", text))
     return "Arabic" if arabic > latin else "English"
+
+
+NO_ANSWER_MESSAGES = {
+    "Arabic": "ما لقيت إجابة لهذا السؤال في المعلومات المتوفرة عندي.",
+    "English": "The answer is not available in the provided context.",
+}
 
 
 def clean_model_answer(content) -> str:
@@ -289,7 +310,7 @@ def rewrite_query(
 
         return rewritten or current_question
 
-    except Exception:
+    except APIError:
         return current_question
 
 
@@ -306,30 +327,88 @@ def retrieve_context(
     search_response = qdrant_client.query_points(
         collection_name=collection_name,
         query=query_vector,
-        limit=limit,
+        limit=SEMANTIC_CANDIDATE_LIMIT if HYBRID_SEARCH else limit,
         with_payload=True,
     )
+    semantic: dict[str, tuple[object, int]] = {
+        str(point.id): (point, rank)
+        for rank, point in enumerate(search_response.points, start=1)
+    }
 
-    results = []
-    for rank, result in enumerate(search_response.points, start=1):
-        payload = result.payload or {}
-        text = payload.get("text")
-        if text and result.score >= threshold:
-            results.append(
-                RetrievedChunk(
-                    text=text,
-                    source=payload.get("source", "unknown"),
-                    score=result.score,
-                    via="semantic",
-                    semantic_rank=rank,
+    if not HYBRID_SEARCH:
+        results = []
+        for point, rank in semantic.values():
+            payload = point.payload or {}
+            if payload.get("text") and point.score >= threshold:
+                results.append(
+                    RetrievedChunk(
+                        text=payload["text"],
+                        source=payload.get("source", "unknown"),
+                        page=payload.get("page"),
+                        score=float(point.score),
+                        via="semantic",
+                        semantic_rank=rank,
+                    )
                 )
-            )
+        return results[:limit]
 
-    return results
+    bm25_hits = get_index(qdrant_client, collection_name).search(
+        query, BM25_CANDIDATE_LIMIT
+    )
+    bm25 = {
+        chunk.id: (rank, score)
+        for rank, (chunk, score) in enumerate(bm25_hits, start=1)
+    }
+    semantic_ids = list(semantic)
+    bm25_ids = [chunk.id for chunk, _ in bm25_hits]
+    fused = rrf_fuse(semantic_ids, bm25_ids, k=60)
+
+    candidates: list[RetrievedChunk] = []
+    for point_id in set(semantic) | set(bm25):
+        semantic_item = semantic.get(point_id)
+        bm25_item = bm25.get(point_id)
+        if semantic_item is None:
+            # Rescue is deliberately limited to candidates for which Qdrant
+            # returned a cosine score; BM25 alone cannot bypass the gate.
+            continue
+        point, semantic_rank = semantic_item
+        payload = point.payload or {}
+        text = payload.get("text")
+        if not text:
+            continue
+        cosine = float(point.score)
+        bm25_rank, bm25_score = bm25_item if bm25_item else (None, 0.0)
+        if cosine < threshold and not (
+            bm25_rank is not None
+            and bm25_rank <= 3
+            and bm25_score >= 1.0
+            and cosine >= 0.15
+        ):
+            continue
+        via = "hybrid" if bm25_item else "semantic"
+        candidates.append(
+            RetrievedChunk(
+                text=text,
+                source=payload.get("source", "unknown"),
+                page=payload.get("page"),
+                score=cosine,
+                via=via,
+                semantic_rank=semantic_rank,
+                bm25_rank=bm25_rank,
+                bm25_score=bm25_score,
+                fusion_score=fused.get(point_id, 0.0),
+            )
+        )
+    candidates.sort(key=lambda item: item.fusion_score, reverse=True)
+    return candidates[:limit]
 
 
 def _call_generation_model(
-    llm_client: OpenAI, model_name: str, prompt: str, max_tokens: int
+    llm_client: OpenAI,
+    model_name: str,
+    prompt: str,
+    language: str,
+    max_tokens: int,
 ):
     return llm_client.chat.completions.create(
         model=model_name,
@@ -338,6 +417,8 @@ def _call_generation_model(
                 "role": "system",
                 "content": (
                     "Answer only from the supplied context. "
+                    f"Answer in {language}. If the context does not support an answer, "
+                    f"reply exactly: {NO_ANSWER_MESSAGES[language]} "
                     "Return only the final answer, with no extra commentary."
                 ),
             },
@@ -353,24 +434,51 @@ def generate_answer(
     model_name: str,
     context: str,
     query: str,
+    language: str,
     previous_answer: str | None = None,
 ) -> str:
     prompt = build_prompt(
-        context=context, query=query, previous_answer=previous_answer
+        context=context,
+        query=query,
+        language=language,
+        previous_answer=previous_answer,
     )
 
     response = _call_generation_model(
-        llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS
+        llm_client, model_name, prompt, language, max_tokens=ANSWER_MAX_TOKENS
     )
     answer = clean_model_answer(response.choices[0].message.content)
 
     if not answer:
         retry_response = _call_generation_model(
-            llm_client, model_name, prompt, max_tokens=ANSWER_MAX_TOKENS_RETRY
+            llm_client,
+            model_name,
+            prompt,
+            language,
+            max_tokens=ANSWER_MAX_TOKENS_RETRY,
         )
         answer = clean_model_answer(retry_response.choices[0].message.content)
 
     return answer
+
+
+def load_embedding_model() -> HuggingFaceEmbeddings:
+    """Load the configured multilingual embedding model without fallback."""
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+
+
+def load_qdrant_client(*, for_ingest: bool = False) -> QdrantClient:
+    url = os.getenv("QDRANT_URL")
+    key_name = "QDRANT_INGEST_API_KEY" if for_ingest else "QDRANT_API_KEY"
+    api_key = os.getenv(key_name)
+    if not url or not api_key:
+        missing = [name for name, value in (("QDRANT_URL", url), (key_name, api_key)) if not value]
+        raise OSError("Missing required environment variables: " + ", ".join(missing))
+    return QdrantClient(
+        url=url,
+        api_key=api_key,
+        timeout=float(os.getenv("QDRANT_TIMEOUT_SECONDS", "10")),
+    )
 
 
 def load_clients() -> tuple[OpenAI, HuggingFaceEmbeddings, QdrantClient]:
@@ -381,71 +489,79 @@ def load_clients() -> tuple[OpenAI, HuggingFaceEmbeddings, QdrantClient]:
     ]
 
     if missing_variables:
-        raise EnvironmentError(
+        raise OSError(
             "Missing environment variables: " + ", ".join(missing_variables)
         )
 
     llm_client = OpenAI(
-        base_url=OPENROUTER_BASE_URL, api_key=os.getenv("OPENROUTER_API_KEY")
+        base_url=OPENROUTER_BASE_URL,
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        timeout=float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "90")),
+        max_retries=0,
     )
-    embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
-    qdrant_client = QdrantClient(
-        url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY")
-    )
+    embedding_model = load_embedding_model()
+    qdrant_client = load_qdrant_client()
 
     return llm_client, embedding_model, qdrant_client
 
 
 def _stable_point_id(source: str, chunk_index: int, chunk: str) -> str:
     """معرف ثابت مبني على المصدر وترتيب القطعة ومحتواها."""
-    digest = hashlib.sha256(f"{source}:{chunk_index}:{chunk}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{source}:{chunk_index}:{chunk}".encode()).hexdigest()
     return str(uuid5(NAMESPACE_URL, digest))
 
 
 def _file_hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    # A settings change must force a safe re-index even if source bytes stay put.
+    versioned = (
+        f"format={CHUNK_FORMAT_VERSION};size={CHUNK_SIZE};overlap={CHUNK_OVERLAP};"
+        f"separators={CHUNK_SEPARATORS!r};model={EMBEDDING_MODEL_NAME};"
+        f"vector_size={VECTOR_SIZE};\n{content}"
+    )
+    return hashlib.sha256(versioned.encode("utf-8")).hexdigest()
 
 
-def _load_source_files(directory: str) -> dict[str, str]:
-    """تحميل محتوى ملفات .md و .txt و .pdf من مجلد قاعدة المعرفة."""
+def _load_source_documents(directory: str) -> dict[str, list[tuple[str, int | None]]]:
+    """Load source text, retaining PDF page boundaries and one-based page numbers."""
     if not os.path.isdir(directory):
         return {}
-
-    files: dict[str, str] = {}
-
+    documents: dict[str, list[tuple[str, int | None]]] = {}
     for filename in sorted(os.listdir(directory)):
         if not filename.lower().endswith(KNOWLEDGE_FILE_EXTENSIONS):
             continue
-
         path = os.path.join(directory, filename)
         extension = os.path.splitext(filename)[1].lower()
-
         try:
-            if extension in {".md", ".txt"}:
-                with open(path, "r", encoding="utf-8") as file_handle:
-                    content = file_handle.read()
-
-            elif extension == ".pdf":
-                reader = PdfReader(path)
+            if extension == ".pdf":
                 pages = []
-
-                for page in reader.pages:
-                    page_text = page.extract_text() or ""
-                    if page_text.strip():
-                        pages.append(page_text)
-
-                content = "\n\n".join(pages)
-
+                for page_number, page in enumerate(PdfReader(path).pages, start=1):
+                    text = (page.extract_text() or "").strip()
+                    if text:
+                        pages.append((text, page_number))
+                if not pages:
+                    logger.warning("pdf_skipped_no_extractable_text source=%s", filename)
+                    continue
+                documents[filename] = pages
             else:
-                continue
+                with open(path, "r", encoding="utf-8") as source_file:
+                    text = source_file.read().strip()
+                if text:
+                    documents[filename] = [(text, None)]
+        except (OSError, UnicodeError, PdfReadError) as error:
+            logger.warning(
+                "source_read_failed source=%s error_type=%s",
+                filename,
+                type(error).__name__,
+            )
+    return documents
 
-            if content.strip():
-                files[filename] = content
 
-        except Exception as error:
-            print(f"Could not read '{filename}': {error}")
-
-    return files
+def _load_source_files(directory: str) -> dict[str, str]:
+    """Compatibility helper returning concatenated text while preserving pages in ingestion."""
+    return {
+        filename: "\n\n".join(text for text, _page in pages)
+        for filename, pages in _load_source_documents(directory).items()
+    }
 
 
 def _existing_source_hashes(qdrant_client: QdrantClient) -> dict[str, str]:
@@ -482,7 +598,19 @@ def _delete_source_points(qdrant_client: QdrantClient, source: str) -> None:
         points_selector=Filter(
             must=[FieldCondition(key="source", match=MatchValue(value=source))]
         ),
+        wait=True,
     )
+
+
+def _ensure_source_index(qdrant_client: QdrantClient) -> None:
+    schema = qdrant_client.get_collection(COLLECTION_NAME).payload_schema or {}
+    if "source" not in schema:
+        qdrant_client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="source",
+            field_schema=PayloadSchemaType.KEYWORD,
+            wait=True,
+        )
 
 
 def _detect_vector_size(embedding_model: HuggingFaceEmbeddings) -> int:
@@ -495,7 +623,7 @@ def ingest_knowledge_base(
     directory: str = KNOWLEDGE_BASE_DIR,
     force: bool = FORCE_REINGEST,
 ) -> None:
-    source_files = _load_source_files(directory)
+    source_files = _load_source_documents(directory)
 
     if not source_files:
         raise ValueError(
@@ -504,10 +632,6 @@ def ingest_knowledge_base(
         )
 
     collection_exists = qdrant_client.collection_exists(COLLECTION_NAME)
-
-    if force and collection_exists:
-        qdrant_client.delete_collection(COLLECTION_NAME)
-        collection_exists = False
 
     if not collection_exists:
         actual_vector_size = _detect_vector_size(embedding_model)
@@ -519,25 +643,28 @@ def ingest_knowledge_base(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=actual_vector_size, distance=Distance.COSINE),
         )
-        print("Collection created.")
+        logger.info("qdrant_collection_created collection=%s", COLLECTION_NAME)
+    _ensure_source_index(qdrant_client)
 
-    existing_hashes = {} if force else _existing_source_hashes(qdrant_client)
+    existing_hashes = _existing_source_hashes(qdrant_client)
     existing_hash_to_source = {h: s for s, h in existing_hashes.items() if h}
     processed_hash_to_source: dict[str, str] = {}
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
-    separators=["\n\n", "\n", "؟ ", ". ", "؛ ", "! ", " ", ""],
+        separators=CHUNK_SEPARATORS,
     )
 
     total_new_chunks = 0
 
-    for source, content in source_files.items():
+    for source, pages in source_files.items():
+        content_for_hash = "\n".join(
+            f"page={page_number}\n{text}" for text, page_number in pages
+        )
+        current_hash = _file_hash(content_for_hash)
 
-        current_hash = _file_hash(content)
-
-        if existing_hashes.get(source) == current_hash:
+        if existing_hashes.get(source) == current_hash and not force:
             print(f"'{source}' لم يتغيّر - تم التخطي.")
             continue
 
@@ -546,6 +673,10 @@ def ingest_knowledge_base(
             or processed_hash_to_source.get(current_hash)
         )
         if duplicate_source and duplicate_source != source:
+            # If this path was previously indexed, remove its stale points now
+            # that another canonical source owns identical content.
+            if source in existing_hashes:
+                _delete_source_points(qdrant_client, source)
             print(
                 f"'{source}' تم تجاوزه - محتواه مطابق تمامًا لملف مفهرس "
                 f"مسبقًا باسم '{duplicate_source}'."
@@ -554,33 +685,43 @@ def ingest_knowledge_base(
 
         processed_hash_to_source[current_hash] = source
 
-        if source in existing_hashes:
+        if source in existing_hashes and (force or existing_hashes[source] != current_hash):
             _delete_source_points(qdrant_client, source)
             print(f"'{source}' تغيّر - يُعاد فهرسته.")
 
-        chunks = text_splitter.split_text(content)
+        chunk_records: list[tuple[str, int | None]] = []
+        for page_text, page_number in pages:
+            chunk_records.extend(
+                (chunk, page_number) for chunk in text_splitter.split_text(page_text)
+            )
+        chunks = [chunk for chunk, _page_number in chunk_records]
         if not chunks:
             continue
-
         embeddings = embedding_model.embed_documents(chunks)
-
-        points = [
-            PointStruct(
-                id=_stable_point_id(source, index, chunk),
-                vector=embedding,
-                payload={
-                    "text": chunk,
-                    "source": source,
-                    "chunk_index": index,
-                    "file_hash": current_hash,
-                },
+        points = []
+        for index, ((chunk, page_number), embedding) in enumerate(
+            zip(chunk_records, embeddings, strict=True)
+        ):
+            payload = {
+                "text": chunk,
+                "source": source,
+                "chunk_index": index,
+                "file_hash": current_hash,
+            }
+            if page_number is not None:
+                payload["page"] = page_number
+            points.append(
+                PointStruct(
+                    id=_stable_point_id(source, index, chunk),
+                    vector=embedding,
+                    payload=payload,
+                )
             )
-            for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-        ]
-
         qdrant_client.upsert(collection_name=COLLECTION_NAME, points=points, wait=True)
         total_new_chunks += len(points)
         print(f"'{source}': تمت إضافة {len(points)} قطعة.")
+
+    invalidate(COLLECTION_NAME)
 
     if total_new_chunks == 0:
         print("قاعدة المعرفة محدَّثة بالكامل - لا حاجة لأي تغيير.")
@@ -595,6 +736,7 @@ def answer_question(
     query: str,
     memory: ConversationMemory,
 ) -> tuple[str, list[str]]:
+    answer_language = detect_language(query)
     rewritten_query = rewrite_query(
         llm_client=llm_client,
         model_name=GENERATION_MODEL_NAME,
@@ -610,6 +752,19 @@ def answer_question(
         embedding_model=embedding_model,
         collection_name=COLLECTION_NAME,
         query=rewritten_query,
+    )
+    log_event(
+        "retrieval_complete",
+        result_count=len(relevant_chunks),
+        results=[
+            {
+                "cosine": round(chunk.score, 5),
+                "semantic_rank": chunk.semantic_rank,
+                "bm25_rank": chunk.bm25_rank,
+                "via": chunk.via,
+            }
+            for chunk in relevant_chunks
+        ],
     )
 
     if not relevant_chunks:
@@ -629,16 +784,16 @@ def answer_question(
         model_name=GENERATION_MODEL_NAME,
         context=context,
         query=rewritten_query,
+        language=answer_language,
         previous_answer=previous_answer,
     )
 
-    if not answer:
-        answer = (
-            "The model did not return a usable final answer. "
-            "Try another non-reasoning instruction model."
-        )
+    if not answer or answer.strip() in NO_ANSWER_MESSAGES.values():
+        answer = answer.strip() if answer else _no_context_message(query)
+        sources: list[str] = []
+    else:
+        sources = sorted({source_label(chunk) for chunk in relevant_chunks})
 
-    sources = sorted({chunk.source for chunk in relevant_chunks})
     memory.add(query, rewritten_query, answer)
     return answer, sources
 
@@ -677,7 +832,7 @@ def main() -> None:
             if sources:
                 print(f"\nSources: {', '.join(sources)}")
 
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - interactive CLI boundary
             error_text = str(error)
             if "402" in error_text or "Payment Required" in error_text:
                 print(

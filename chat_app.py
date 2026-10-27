@@ -18,7 +18,7 @@ def setting(name: str, default: str = "") -> str:
         return value
     try:
         return str(st.secrets.get(name, default))
-    except Exception:
+    except Exception:  # noqa: BLE001 - Streamlit secrets are optional for local use
         return default
 
 

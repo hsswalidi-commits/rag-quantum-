@@ -1,7 +1,9 @@
-name: Build and deploy RAG API
+name: Production deployment
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -13,7 +15,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate application and infrastructure
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+      - name: Lint
+        run: uv run ruff check .
+      - name: Unit tests
+        run: uv run pytest -q
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.0
+      - name: Validate Terraform
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
   deploy:
+    name: Build and deploy Cloud Run
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -24,10 +58,8 @@ jobs:
       SERVICE: rag-agent-app
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
-
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
@@ -37,13 +69,15 @@ jobs:
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: leap-coop
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.17.0
 
-      - name: Check required GitHub secrets
+      - name: Validate required runtime secrets exist
         shell: bash
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -63,9 +97,9 @@ jobs:
         working-directory: terraform
         run: terraform init -input=false
 
-      # Create the registry and Secret Manager metadata before pushing images
-      # or uploading secret payloads. No secret values enter Terraform/state.
-      - name: Bootstrap cloud resources
+      # Bootstrap resource metadata first; secret payloads are never passed to
+      # Terraform and therefore never enter Terraform state or plan files.
+      - name: Bootstrap APIs, registry, identity, and secret containers
         working-directory: terraform
         run: |
           terraform apply -input=false -auto-approve \
@@ -76,20 +110,20 @@ jobs:
             -target=google_secret_manager_secret_iam_member.runtime_access \
             -var="image=${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:bootstrap"
 
-      - name: Configure Artifact Registry Docker auth
+      - name: Authenticate Docker to Artifact Registry
         run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-      - name: Build and push image
+      - name: Build and push immutable image
         id: image
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:${GITHUB_SHA}"
-          docker build --pull --tag "${IMAGE}" .
-          docker push "${IMAGE}"
-          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+          image="${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:${GITHUB_SHA}"
+          docker build --pull --platform linux/amd64 --tag "$image" .
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
 
-      - name: Publish GitHub secrets to Secret Manager
+      - name: Publish runtime secrets to Secret Manager
         shell: bash
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -103,7 +137,7 @@ jobs:
           printf '%s' "$QDRANT_URL" | gcloud secrets versions add rag-qdrant-url --data-file=- --project "$PROJECT_ID" >/dev/null
           printf '%s' "$API_BEARER_TOKEN" | gcloud secrets versions add rag-api-bearer-token --data-file=- --project "$PROJECT_ID" >/dev/null
 
-      - name: Read current secret version identifiers
+      - name: Resolve pinned Secret Manager versions
         id: secret_versions
         shell: bash
         run: |
@@ -118,23 +152,40 @@ jobs:
           echo "qdrant_url=$(latest_version rag-qdrant-url)" >> "$GITHUB_OUTPUT"
           echo "api_token=$(latest_version rag-api-bearer-token)" >> "$GITHUB_OUTPUT"
 
-      - name: Terraform validate and plan
+      - name: Terraform plan
         working-directory: terraform
         env:
           TF_VAR_image: ${{ steps.image.outputs.image }}
           TF_VAR_runtime_secret_versions: '{"openrouter":"${{ steps.secret_versions.outputs.openrouter }}","qdrant_key":"${{ steps.secret_versions.outputs.qdrant_key }}","qdrant_url":"${{ steps.secret_versions.outputs.qdrant_url }}","api_token":"${{ steps.secret_versions.outputs.api_token }}"}'
-        run: |
-          terraform fmt -check -recursive
-          terraform validate
-          terraform plan -input=false -out=tfplan
+          TF_VAR_monitoring_notification_channels: ${{ vars.MONITORING_NOTIFICATION_CHANNELS || '[]' }}
+        run: terraform plan -input=false -out=tfplan
 
       - name: Terraform apply
         working-directory: terraform
         env:
           TF_VAR_image: ${{ steps.image.outputs.image }}
           TF_VAR_runtime_secret_versions: '{"openrouter":"${{ steps.secret_versions.outputs.openrouter }}","qdrant_key":"${{ steps.secret_versions.outputs.qdrant_key }}","qdrant_url":"${{ steps.secret_versions.outputs.qdrant_url }}","api_token":"${{ steps.secret_versions.outputs.api_token }}"}'
+          TF_VAR_monitoring_notification_channels: ${{ vars.MONITORING_NOTIFICATION_CHANNELS || '[]' }}
         run: terraform apply -input=false -auto-approve tfplan
 
-      - name: Show service URL
+      - name: Verify Cloud Run health and readiness
+        shell: bash
         working-directory: terraform
-        run: terraform output -raw service_url
+        run: |
+          set -euo pipefail
+          url="$(terraform output -raw service_url)"
+          for path in healthz readyz; do
+            ready=0
+            for attempt in $(seq 1 18); do
+              if curl --fail --silent --show-error "${url}/${path}" >/dev/null; then
+                ready=1
+                break
+              fi
+              sleep 10
+            done
+            if [[ "$ready" != 1 ]]; then
+              echo "Cloud Run ${path} check did not become healthy." >&2
+              exit 1
+            fi
+          done
+          echo "Cloud Run health and Qdrant readiness checks passed."

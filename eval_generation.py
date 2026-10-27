@@ -1,10 +1,13 @@
 
 import csv
+import os
 import re
+import sys
 
-from app import ConversationMemory, answer_question, load_clients
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
 from eval_rag import TEST_CASES
-
+from rag.core import ConversationMemory, answer_question, load_clients
 
 KEYWORD_CHECKS: dict[str, list[str]] = {
     "ما هو مبدأ عدم اليقين لهايزنبرغ؟": ["هايزنبرغ", "الموضع", "الزخم"],
@@ -79,7 +82,6 @@ def main() -> None:
     language_ok = 0
 
     for index, (question, expected) in enumerate(TEST_CASES, start=1):
-       uv run black app.py chat_app.py storage.py eval_rag.py eval_generation.py compare_embeddings.py
         memory = ConversationMemory()
 
         answer, sources = answer_question(
