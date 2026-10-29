@@ -47,6 +47,11 @@ def test_terraform_deployment_contract() -> None:
         'default     = "me-central1"',
         'name                = "rag-agent-app"',
         'repository_id = "rag-agent"',
+        "immutable_tags = true",
+        "container_port = 8080",
+        '"iam.googleapis.com"',
+        '"cloudresourcemanager.googleapis.com"',
+        '"serviceusage.googleapis.com"',
         'member   = "allUsers"',
         'roles/secretmanager.secretAccessor',
         '"rag-openrouter-api-key"',
@@ -61,7 +66,7 @@ def test_workflow_requires_expected_github_secrets_and_artifact_registry() -> No
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
 
     for name in (
-        "GCP_SA_KEY",
+        "GCP_SERVICE_ACCOUNT_KEY_FILE",
         "OPENROUTER_API_KEY",
         "QDRANT_URL",
         "QDRANT_API_KEY",
@@ -69,5 +74,7 @@ def test_workflow_requires_expected_github_secrets_and_artifact_registry() -> No
     ):
         assert f"secrets.{name}" in workflow
 
-    assert "${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:${GITHUB_SHA}" in workflow
+    assert 'tag="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in workflow
+    assert '"${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:${tag}"' in workflow
     assert "toJSON(secrets)" not in workflow
+    assert "vars." not in workflow

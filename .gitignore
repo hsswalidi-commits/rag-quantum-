@@ -17,4 +17,6 @@ crash.*.log
 *.tfvars
 *.tfvars.json
 gcp-sa-key.json
+service-account*.json
+**/service-account*.json
 gha-creds-*.json

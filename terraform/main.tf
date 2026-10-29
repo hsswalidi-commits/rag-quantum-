@@ -58,6 +58,11 @@ variable "max_instances" {
   description = "Maximum Cloud Run instance count."
   type        = number
   default     = 3
+
+  validation {
+    condition     = var.max_instances >= 1 && floor(var.max_instances) == var.max_instances
+    error_message = "max_instances must be a positive integer."
+  }
 }
 
 variable "monitoring_notification_channels" {
@@ -97,6 +102,9 @@ resource "google_project_service" "required" {
     "run.googleapis.com",
     "artifactregistry.googleapis.com",
     "secretmanager.googleapis.com",
+    "iam.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+    "serviceusage.googleapis.com",
     "monitoring.googleapis.com",
   ])
 
@@ -111,6 +119,10 @@ resource "google_artifact_registry_repository" "app" {
   repository_id = "rag-agent"
   description   = "Container images for rag-agent-app Cloud Run service"
   format        = "DOCKER"
+
+  docker_config {
+    immutable_tags = true
+  }
 
   depends_on = [google_project_service.required]
 }
@@ -164,6 +176,10 @@ resource "google_cloud_run_v2_service" "app" {
 
     containers {
       image = var.image
+
+      ports {
+        container_port = 8080
+      }
 
       resources {
         limits = {

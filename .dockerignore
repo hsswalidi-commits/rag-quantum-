@@ -11,6 +11,10 @@ __pycache__
 conversations*
 gcp-sa-key.json
 **/gcp-sa-key.json
+service-account*.json
+**/service-account*.json
+gha-creds-*.json
+**/gha-creds-*.json
 .terraform
 **/.terraform
 *.tfstate

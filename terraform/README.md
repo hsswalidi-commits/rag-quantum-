@@ -41,9 +41,13 @@ on that one secret. Secrets use regional replication in `me-central1`.
 
 Add these **repository secrets** in Settings → Secrets and variables → Actions:
 
-- `GCP_SA_KEY`: JSON key for the dedicated deployment service account. This is
+- `GCP_SERVICE_ACCOUNT_KEY_FILE`: raw service-account JSON for the dedicated
+  deployment service account. This is
   used only by the Google auth action; the workflow never writes it into the
   checkout or Terraform state.
+- `PROJECT_ID`: target Google Cloud project ID (`leap-coop`).
+- `REGION_NAME`: deployment region (`me-central1`).
+- `MAX_INSTANCES`: positive integer Cloud Run maximum instance count.
 - `OPENROUTER_API_KEY`
 - `QDRANT_API_KEY`: create this as a **read-only** Qdrant key.
 - `QDRANT_URL`
@@ -54,26 +58,25 @@ trusted local/CI ingestion environment. Do not add that key to the Cloud Run
 service configuration.
 
 Restrict the GitHub `production` environment to `main` and add required
-reviewers if desired. Optionally create a Cloud Monitoring notification channel
-and define the GitHub environment variable `MONITORING_NOTIFICATION_CHANNELS`
-as a JSON list of channel resource names. Example shape:
-`["projects/leap-coop/notificationChannels/123456789"]`. Without this variable,
-alert policies are created but do not send notifications.
+reviewers. Alert policies are created without notification recipients by
+default; configure `monitoring_notification_channels` through an approved
+Terraform variable input if alert delivery is required.
 
 ## Deploy flow
 
-1. Pull requests run Ruff, the existing offline setup check, pytest, Terraform
-   formatting, and Terraform validation.
-2. After merge to `main`, Actions authenticates with `GCP_SA_KEY`, bootstraps
-   APIs/registry/secret containers, builds an immutable commit-tagged amd64
-   image, and pushes it to Artifact Registry.
-3. Action secrets are piped directly into Secret Manager. Their payloads are
-   never passed as Terraform variables. Terraform only receives the pinned
-   numeric secret-version identifiers (marked sensitive to redact them in
-   plans) and the image reference.
-4. Terraform deploys `rag-agent-app`, grants `allUsers` Cloud Run invoker, and
-   attaches the secret references and runtime service account.
-5. Actions checks `/healthz` and `/readyz` after deployment.
+1. Pull requests run Ruff, pytest, Terraform formatting, and Terraform
+   validation.
+2. After merge to `main`, Actions checks required secrets without printing
+   their values, validates the service-account JSON, authenticates with
+   `GCP_SERVICE_ACCOUNT_KEY_FILE`, and configures Artifact Registry Docker auth.
+3. Terraform initializes the remote backend, validates, and bootstraps APIs,
+   the registry, runtime identity, and secret containers before the first push.
+4. Actions builds and pushes an amd64 image with a unique immutable tag, then
+   pipes runtime secrets directly into Secret Manager.
+5. Terraform receives only pinned numeric secret-version identifiers (marked
+   sensitive) and the pushed image reference, then deploys `rag-agent-app` and
+   grants `allUsers` the Cloud Run invoker role.
+6. Actions checks `/healthz` and `/readyz` after deployment.
 
 The API remains bearer-authenticated even though the Cloud Run service is
 publicly invokable. A leaked bearer token can be used by anyone; rotate it in
@@ -104,4 +107,4 @@ GitHub Secrets and deploy again if it is exposed.
   hosted runner builds amd64 natively.
 - Service-account keys are long-lived credentials. Workload Identity Federation
   is the recommended follow-up migration when you are ready to replace the
-  requested `GCP_SA_KEY` secret.
+  requested `GCP_SERVICE_ACCOUNT_KEY_FILE` secret.

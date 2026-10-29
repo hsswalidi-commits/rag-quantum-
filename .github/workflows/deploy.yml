@@ -53,49 +53,93 @@ jobs:
     permissions:
       contents: read
     env:
-      PROJECT_ID: leap-coop
-      REGION: me-central1
+      PROJECT_ID: ${{ secrets.PROJECT_ID }}
+      REGION: ${{ secrets.REGION_NAME }}
+      MAX_INSTANCES: ${{ secrets.MAX_INSTANCES }}
       SERVICE: rag-agent-app
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
+      TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
+      TF_VAR_region: ${{ secrets.REGION_NAME }}
+      TF_VAR_max_instances: ${{ secrets.MAX_INSTANCES }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Preflight required secrets
+        shell: bash
+        env:
+          HAS_GCP_SERVICE_ACCOUNT_KEY_FILE: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY_FILE != '' }}
+          HAS_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY != '' }}
+          HAS_QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY != '' }}
+          HAS_QDRANT_URL: ${{ secrets.QDRANT_URL != '' }}
+          HAS_PROJECT_ID: ${{ secrets.PROJECT_ID != '' }}
+          HAS_REGION_NAME: ${{ secrets.REGION_NAME != '' }}
+          HAS_MAX_INSTANCES: ${{ secrets.MAX_INSTANCES != '' }}
+          HAS_API_BEARER_TOKEN: ${{ secrets.API_BEARER_TOKEN != '' }}
+          GCP_SERVICE_ACCOUNT_KEY_FILE: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY_FILE }}
+          MAX_INSTANCES: ${{ secrets.MAX_INSTANCES }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ "$HAS_GCP_SERVICE_ACCOUNT_KEY_FILE" == "true" ]] || missing+=(GCP_SERVICE_ACCOUNT_KEY_FILE)
+          [[ "$HAS_OPENROUTER_API_KEY" == "true" ]] || missing+=(OPENROUTER_API_KEY)
+          [[ "$HAS_QDRANT_API_KEY" == "true" ]] || missing+=(QDRANT_API_KEY)
+          [[ "$HAS_QDRANT_URL" == "true" ]] || missing+=(QDRANT_URL)
+          [[ "$HAS_PROJECT_ID" == "true" ]] || missing+=(PROJECT_ID)
+          [[ "$HAS_REGION_NAME" == "true" ]] || missing+=(REGION_NAME)
+          [[ "$HAS_MAX_INSTANCES" == "true" ]] || missing+=(MAX_INSTANCES)
+          [[ "$HAS_API_BEARER_TOKEN" == "true" ]] || missing+=(API_BEARER_TOKEN)
+
+          if ((${#missing[@]})); then
+            printf 'Missing required GitHub secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+          if [[ "$PROJECT_ID" != "leap-coop" || "$REGION" != "me-central1" ]]; then
+            echo "PROJECT_ID and REGION_NAME must target leap-coop/me-central1." >&2
+            exit 1
+          fi
+
+          if ! [[ "$MAX_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "MAX_INSTANCES must be a positive integer." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$GCP_SERVICE_ACCOUNT_KEY_FILE" | jq -e \
+            '.type == "service_account" and (.private_key | type == "string" and length > 0) and (.client_email | type == "string" and length > 0)' \
+            >/dev/null 2>&1; then
+            echo "GCP_SERVICE_ACCOUNT_KEY_FILE must contain raw service-account JSON." >&2
+            exit 1
+          fi
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY_FILE }}
           create_credentials_file: true
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
         with:
-          project_id: leap-coop
+          project_id: ${{ secrets.PROJECT_ID }}
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.17.0
 
-      - name: Validate required runtime secrets exist
-        shell: bash
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          QDRANT_URL: ${{ secrets.QDRANT_URL }}
-          API_BEARER_TOKEN: ${{ secrets.API_BEARER_TOKEN }}
-        run: |
-          set -euo pipefail
-          for name in OPENROUTER_API_KEY QDRANT_API_KEY QDRANT_URL API_BEARER_TOKEN; do
-            if [[ -z "${!name}" ]]; then
-              echo "Required GitHub secret is missing: ${name}" >&2
-              exit 1
-            fi
-          done
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
       - name: Terraform initialize
         working-directory: terraform
         run: terraform init -input=false
+
+      - name: Validate Terraform
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform validate
 
       # Bootstrap resource metadata first; secret payloads are never passed to
       # Terraform and therefore never enter Terraform state or plan files.
@@ -110,15 +154,13 @@ jobs:
             -target=google_secret_manager_secret_iam_member.runtime_access \
             -var="image=${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:bootstrap"
 
-      - name: Authenticate Docker to Artifact Registry
-        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
-
       - name: Build and push immutable image
         id: image
         shell: bash
         run: |
           set -euo pipefail
-          image="${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:${GITHUB_SHA}"
+          tag="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          image="${REGION}-docker.pkg.dev/${PROJECT_ID}/rag-agent/${SERVICE}:${tag}"
           docker build --pull --platform linux/amd64 --tag "$image" .
           docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
@@ -143,9 +185,15 @@ jobs:
         run: |
           set -euo pipefail
           latest_version() {
-            gcloud secrets versions list "$1" --project "$PROJECT_ID" \
+            local version
+            version="$(gcloud secrets versions list "$1" --project "$PROJECT_ID" \
               --filter="state=ENABLED" --sort-by="~createTime" --limit=1 \
-              --format="value(name)" | sed 's#^.*/##'
+              --format="value(name)" | sed 's#^.*/##')"
+            if [[ -z "$version" ]]; then
+              echo "No enabled Secret Manager version found for $1." >&2
+              exit 1
+            fi
+            printf '%s' "$version"
           }
           echo "openrouter=$(latest_version rag-openrouter-api-key)" >> "$GITHUB_OUTPUT"
           echo "qdrant_key=$(latest_version rag-qdrant-api-key)" >> "$GITHUB_OUTPUT"
@@ -157,7 +205,6 @@ jobs:
         env:
           TF_VAR_image: ${{ steps.image.outputs.image }}
           TF_VAR_runtime_secret_versions: '{"openrouter":"${{ steps.secret_versions.outputs.openrouter }}","qdrant_key":"${{ steps.secret_versions.outputs.qdrant_key }}","qdrant_url":"${{ steps.secret_versions.outputs.qdrant_url }}","api_token":"${{ steps.secret_versions.outputs.api_token }}"}'
-          TF_VAR_monitoring_notification_channels: ${{ vars.MONITORING_NOTIFICATION_CHANNELS || '[]' }}
         run: terraform plan -input=false -out=tfplan
 
       - name: Terraform apply
@@ -165,7 +212,6 @@ jobs:
         env:
           TF_VAR_image: ${{ steps.image.outputs.image }}
           TF_VAR_runtime_secret_versions: '{"openrouter":"${{ steps.secret_versions.outputs.openrouter }}","qdrant_key":"${{ steps.secret_versions.outputs.qdrant_key }}","qdrant_url":"${{ steps.secret_versions.outputs.qdrant_url }}","api_token":"${{ steps.secret_versions.outputs.api_token }}"}'
-          TF_VAR_monitoring_notification_channels: ${{ vars.MONITORING_NOTIFICATION_CHANNELS || '[]' }}
         run: terraform apply -input=false -auto-approve tfplan
 
       - name: Verify Cloud Run health and readiness
